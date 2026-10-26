@@ -1,0 +1,477 @@
+"""
+Bank Account Management System (GUI Version)
+Concepts: OOP, Inheritance, File Handling (JSON), Exception Handling, Tkinter GUI
+Run: python bank_gui.py
+"""
+
+import json
+import os
+import random
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog
+from datetime import datetime
+
+DATA_FILE = "bank_data.json"
+
+
+# ---------------------------------------------------------------
+# 1. CUSTOM EXCEPTIONS
+# ---------------------------------------------------------------
+class BankError(Exception):
+    """Base class for all bank related errors."""
+
+
+class InvalidAmountError(BankError):
+    pass
+
+
+class InsufficientFundsError(BankError):
+    pass
+
+
+class AccountNotFoundError(BankError):
+    pass
+
+
+class AuthenticationError(BankError):
+    pass
+
+
+# ---------------------------------------------------------------
+# 2. ACCOUNT CLASSES (OOP + INHERITANCE)
+# ---------------------------------------------------------------
+class Account:
+    """Base class for every account."""
+
+    account_type = "Basic"
+
+    def __init__(self, acc_no, name, pin, balance=0.0, transactions=None):
+        self.acc_no = acc_no
+        self.name = name
+        self._pin = pin
+        self._balance = balance
+        self.transactions = transactions or []
+
+    @property
+    def balance(self):
+        return self._balance
+
+    def verify_pin(self, pin):
+        if pin != self._pin:
+            raise AuthenticationError("Incorrect PIN.")
+
+    def _log(self, kind, amount):
+        self.transactions.append({
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "type": kind,
+            "amount": amount,
+            "balance": self._balance,
+        })
+
+    @staticmethod
+    def _validate_amount(amount):
+        if amount <= 0:
+            raise InvalidAmountError("Amount must be greater than 0.")
+
+    def available_to_withdraw(self):
+        return self._balance
+
+    def deposit(self, amount):
+        self._validate_amount(amount)
+        self._balance += amount
+        self._log("Deposit", amount)
+
+    def withdraw(self, amount):
+        self._validate_amount(amount)
+        if amount > self.available_to_withdraw():
+            raise InsufficientFundsError(
+                f"Insufficient funds. You can withdraw up to "
+                f"{self.available_to_withdraw():.2f}."
+            )
+        self._balance -= amount
+        self._log("Withdraw", amount)
+
+    def to_dict(self):
+        return {
+            "type": self.account_type,
+            "acc_no": self.acc_no,
+            "name": self.name,
+            "pin": self._pin,
+            "balance": self._balance,
+            "transactions": self.transactions,
+        }
+
+    def __str__(self):
+        return (f"[{self.account_type}] A/C No: {self.acc_no} | "
+                f"Name: {self.name} | Balance: {self._balance:.2f}")
+
+
+class SavingsAccount(Account):
+    """Savings: minimum balance + interest."""
+
+    account_type = "Savings"
+    MIN_BALANCE = 500
+    INTEREST_RATE = 0.04
+
+    def available_to_withdraw(self):
+        return max(self._balance - self.MIN_BALANCE, 0)
+
+    def add_interest(self):
+        interest = round(self._balance * self.INTEREST_RATE, 2)
+        self._balance += interest
+        self._log("Interest", interest)
+        return interest
+
+
+class CurrentAccount(Account):
+    """Current: overdraft allowed up to a limit."""
+
+    account_type = "Current"
+    OVERDRAFT_LIMIT = 5000
+
+    def available_to_withdraw(self):
+        return self._balance + self.OVERDRAFT_LIMIT
+
+
+ACCOUNT_TYPES = {
+    "Savings": SavingsAccount,
+    "Current": CurrentAccount,
+}
+
+
+# ---------------------------------------------------------------
+# 3. BANK CLASS (manages accounts + file handling)
+# ---------------------------------------------------------------
+class Bank:
+    def __init__(self, filename=DATA_FILE):
+        self.filename = filename
+        self.accounts = {}
+        self.load()
+
+    def save(self):
+        try:
+            with open(self.filename, "w") as f:
+                json.dump([a.to_dict() for a in self.accounts.values()], f, indent=4)
+        except OSError as e:
+            messagebox.showerror("Save Error", f"Could not save data: {e}")
+
+    def load(self):
+        if not os.path.exists(self.filename):
+            return
+        try:
+            with open(self.filename, "r") as f:
+                for d in json.load(f):
+                    cls = ACCOUNT_TYPES[d["type"]]
+                    self.accounts[d["acc_no"]] = cls(
+                        d["acc_no"], d["name"], d["pin"],
+                        d["balance"], d["transactions"],
+                    )
+        except (json.JSONDecodeError, KeyError):
+            messagebox.showwarning(
+                "Data Error", "Data file is corrupted. Starting with an empty bank.")
+            self.accounts = {}
+        except OSError as e:
+            messagebox.showerror("Read Error", f"Could not read data file: {e}")
+
+    def _new_acc_no(self):
+        while True:
+            no = str(random.randint(10000000, 99999999))
+            if no not in self.accounts:
+                return no
+
+    def create_account(self, acc_type, name, pin, opening_balance):
+        cls = ACCOUNT_TYPES[acc_type]
+        if not name:
+            raise BankError("Name cannot be empty.")
+        if not (pin.isdigit() and len(pin) == 4):
+            raise BankError("PIN must be exactly 4 digits.")
+        if opening_balance < 0:
+            raise InvalidAmountError("Opening balance cannot be negative.")
+        if cls is SavingsAccount and opening_balance < SavingsAccount.MIN_BALANCE:
+            raise BankError(
+                f"Savings account needs minimum {SavingsAccount.MIN_BALANCE} to open.")
+        acc = cls(self._new_acc_no(), name, pin, 0.0)
+        if opening_balance > 0:
+            acc.deposit(opening_balance)
+        self.accounts[acc.acc_no] = acc
+        self.save()
+        return acc
+
+    def get_account(self, acc_no):
+        if acc_no not in self.accounts:
+            raise AccountNotFoundError(f"Account {acc_no} not found.")
+        return self.accounts[acc_no]
+
+    def transfer(self, from_no, to_no, amount, pin):
+        if from_no == to_no:
+            raise BankError("Cannot transfer to the same account.")
+        sender = self.get_account(from_no)
+        receiver = self.get_account(to_no)
+        sender.verify_pin(pin)
+        sender.withdraw(amount)
+        receiver.deposit(amount)
+        self.save()
+
+    def delete_account(self, acc_no, pin):
+        acc = self.get_account(acc_no)
+        acc.verify_pin(pin)
+        del self.accounts[acc_no]
+        self.save()
+
+
+# ---------------------------------------------------------------
+# 4. GUI
+# ---------------------------------------------------------------
+def to_float(text):
+    try:
+        return float(text.strip())
+    except ValueError:
+        raise InvalidAmountError("Please enter a valid number.")
+
+
+def labeled_entry(parent, text, row, show=None):
+    ttk.Label(parent, text=text).grid(row=row, column=0, sticky="w", padx=10, pady=8)
+    entry = ttk.Entry(parent, width=30, show=show)
+    entry.grid(row=row, column=1, padx=10, pady=8)
+    return entry
+
+
+class BankApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Bank Account Management System")
+        self.geometry("720x520")
+        self.minsize(680, 480)
+
+        self.bank = Bank()
+
+        ttk.Style(self).theme_use("clam")
+
+        ttk.Label(self, text="🏦 Bank Account Management System",
+                  font=("Segoe UI", 16, "bold")).pack(pady=(12, 4))
+
+        self.status = tk.StringVar(value="Welcome!")
+        ttk.Label(self, textvariable=self.status, foreground="#0a5").pack(side="bottom",
+                                                                         pady=6)
+
+        self.tabs = ttk.Notebook(self)
+        self.tabs.pack(fill="both", expand=True, padx=10, pady=8)
+
+        self.build_create_tab()
+        self.build_money_tab()
+        self.build_transfer_tab()
+        self.build_info_tab()
+        self.build_list_tab()
+
+        self.tabs.bind("<<NotebookTabChanged>>", lambda e: self.refresh_list())
+
+    # ---------- common error handler ----------
+    def run(self, func):
+        try:
+            func()
+        except BankError as e:
+            messagebox.showerror("Error", str(e))
+        except Exception as e:
+            messagebox.showerror("Unexpected Error", str(e))
+
+    @staticmethod
+    def clear(*entries):
+        for e in entries:
+            e.delete(0, tk.END)
+
+    # ---------- Tab 1: Create Account ----------
+    def build_create_tab(self):
+        f = ttk.Frame(self.tabs)
+        self.tabs.add(f, text="Create Account")
+
+        self.c_name = labeled_entry(f, "Account holder name:", 0)
+
+        ttk.Label(f, text="Account type:").grid(row=1, column=0, sticky="w",
+                                                padx=10, pady=8)
+        self.c_type = ttk.Combobox(f, values=list(ACCOUNT_TYPES), state="readonly",
+                                   width=27)
+        self.c_type.current(0)
+        self.c_type.grid(row=1, column=1, padx=10, pady=8)
+
+        self.c_pin = labeled_entry(f, "Set 4-digit PIN:", 2, show="*")
+        self.c_bal = labeled_entry(f, "Opening balance:", 3)
+
+        ttk.Button(f, text="Create Account", command=lambda: self.run(self.create)
+                   ).grid(row=4, column=0, columnspan=2, pady=16)
+
+        ttk.Label(f, text=f"Savings: min balance {SavingsAccount.MIN_BALANCE}, "
+                          f"interest {SavingsAccount.INTEREST_RATE*100:.0f}%/year\n"
+                          f"Current: overdraft up to {CurrentAccount.OVERDRAFT_LIMIT}",
+                  foreground="#555").grid(row=5, column=0, columnspan=2)
+
+    def create(self):
+        acc = self.bank.create_account(
+            self.c_type.get(), self.c_name.get().strip(),
+            self.c_pin.get().strip(), to_float(self.c_bal.get()))
+        messagebox.showinfo("Success",
+                            f"Account created!\n\nYour account number: {acc.acc_no}")
+        self.status.set(f"Account {acc.acc_no} created.")
+        self.clear(self.c_name, self.c_pin, self.c_bal)
+
+    # ---------- Tab 2: Deposit / Withdraw ----------
+    def build_money_tab(self):
+        f = ttk.Frame(self.tabs)
+        self.tabs.add(f, text="Deposit / Withdraw")
+
+        self.m_acc = labeled_entry(f, "Account number:", 0)
+        self.m_pin = labeled_entry(f, "PIN (only for withdraw):", 1, show="*")
+        self.m_amt = labeled_entry(f, "Amount:", 2)
+
+        btns = ttk.Frame(f)
+        btns.grid(row=3, column=0, columnspan=2, pady=16)
+        ttk.Button(btns, text="Deposit",
+                   command=lambda: self.run(self.deposit)).pack(side="left", padx=8)
+        ttk.Button(btns, text="Withdraw",
+                   command=lambda: self.run(self.withdraw)).pack(side="left", padx=8)
+
+    def deposit(self):
+        acc = self.bank.get_account(self.m_acc.get().strip())
+        acc.deposit(to_float(self.m_amt.get()))
+        self.bank.save()
+        self.status.set(f"Deposited. New balance: {acc.balance:.2f}")
+        messagebox.showinfo("Success", f"Deposited.\nNew balance: {acc.balance:.2f}")
+        self.clear(self.m_amt)
+
+    def withdraw(self):
+        acc = self.bank.get_account(self.m_acc.get().strip())
+        acc.verify_pin(self.m_pin.get().strip())
+        acc.withdraw(to_float(self.m_amt.get()))
+        self.bank.save()
+        self.status.set(f"Withdrawn. New balance: {acc.balance:.2f}")
+        messagebox.showinfo("Success", f"Withdrawn.\nNew balance: {acc.balance:.2f}")
+        self.clear(self.m_amt, self.m_pin)
+
+    # ---------- Tab 3: Transfer ----------
+    def build_transfer_tab(self):
+        f = ttk.Frame(self.tabs)
+        self.tabs.add(f, text="Transfer Money")
+
+        self.t_src = labeled_entry(f, "From account number:", 0)
+        self.t_dst = labeled_entry(f, "To account number:", 1)
+        self.t_pin = labeled_entry(f, "Your PIN:", 2, show="*")
+        self.t_amt = labeled_entry(f, "Amount:", 3)
+
+        ttk.Button(f, text="Transfer", command=lambda: self.run(self.transfer)
+                   ).grid(row=4, column=0, columnspan=2, pady=16)
+
+    def transfer(self):
+        self.bank.transfer(self.t_src.get().strip(), self.t_dst.get().strip(),
+                           to_float(self.t_amt.get()), self.t_pin.get().strip())
+        self.status.set("Transfer successful.")
+        messagebox.showinfo("Success", "Transfer successful.")
+        self.clear(self.t_pin, self.t_amt)
+
+    # ---------- Tab 4: Balance / History / Interest ----------
+    def build_info_tab(self):
+        f = ttk.Frame(self.tabs)
+        self.tabs.add(f, text="Balance & History")
+
+        top = ttk.Frame(f)
+        top.pack(fill="x", pady=8)
+        ttk.Label(top, text="Account number:").grid(row=0, column=0, padx=10, pady=4)
+        self.i_acc = ttk.Entry(top, width=20)
+        self.i_acc.grid(row=0, column=1, padx=6)
+        ttk.Label(top, text="PIN:").grid(row=0, column=2, padx=10)
+        self.i_pin = ttk.Entry(top, width=12, show="*")
+        self.i_pin.grid(row=0, column=3, padx=6)
+
+        btns = ttk.Frame(f)
+        btns.pack(pady=4)
+        ttk.Button(btns, text="Check Balance",
+                   command=lambda: self.run(self.check_balance)).pack(side="left", padx=6)
+        ttk.Button(btns, text="Transaction History",
+                   command=lambda: self.run(self.show_history)).pack(side="left", padx=6)
+        ttk.Button(btns, text="Add Interest (Savings)",
+                   command=lambda: self.run(self.add_interest)).pack(side="left", padx=6)
+
+        self.i_info = tk.StringVar()
+        ttk.Label(f, textvariable=self.i_info, font=("Segoe UI", 10, "bold")
+                  ).pack(pady=6)
+
+        cols = ("time", "type", "amount", "balance")
+        self.hist = ttk.Treeview(f, columns=cols, show="headings", height=10)
+        for c, w in zip(cols, (160, 90, 110, 110)):
+            self.hist.heading(c, text=c.title())
+            self.hist.column(c, width=w, anchor="center")
+        self.hist.pack(fill="both", expand=True, padx=10, pady=6)
+
+    def _authed_account(self):
+        acc = self.bank.get_account(self.i_acc.get().strip())
+        acc.verify_pin(self.i_pin.get().strip())
+        return acc
+
+    def check_balance(self):
+        acc = self._authed_account()
+        self.i_info.set(str(acc))
+
+    def show_history(self):
+        acc = self._authed_account()
+        self.i_info.set(str(acc))
+        self.hist.delete(*self.hist.get_children())
+        if not acc.transactions:
+            messagebox.showinfo("History", "No transactions yet.")
+        for t in acc.transactions:
+            self.hist.insert("", "end", values=(
+                t["time"], t["type"], f"{t['amount']:.2f}", f"{t['balance']:.2f}"))
+
+    def add_interest(self):
+        acc = self.bank.get_account(self.i_acc.get().strip())
+        if not isinstance(acc, SavingsAccount):
+            raise BankError("Interest is only for Savings accounts.")
+        interest = acc.add_interest()
+        self.bank.save()
+        self.i_info.set(str(acc))
+        messagebox.showinfo("Interest Added",
+                            f"Interest {interest:.2f} added.\n"
+                            f"Balance: {acc.balance:.2f}")
+
+    # ---------- Tab 5: All Accounts / Delete ----------
+    def build_list_tab(self):
+        f = ttk.Frame(self.tabs)
+        self.tabs.add(f, text="All Accounts")
+
+        cols = ("acc_no", "name", "type", "balance")
+        self.tree = ttk.Treeview(f, columns=cols, show="headings", height=12)
+        for c, w in zip(cols, (120, 200, 100, 120)):
+            self.tree.heading(c, text=c.replace("_", " ").title())
+            self.tree.column(c, width=w, anchor="center")
+        self.tree.pack(fill="both", expand=True, padx=10, pady=10)
+
+        btns = ttk.Frame(f)
+        btns.pack(pady=6)
+        ttk.Button(btns, text="Refresh", command=self.refresh_list
+                   ).pack(side="left", padx=8)
+        ttk.Button(btns, text="Delete Selected Account",
+                   command=lambda: self.run(self.delete_selected)).pack(side="left", padx=8)
+
+    def refresh_list(self):
+        self.tree.delete(*self.tree.get_children())
+        for a in self.bank.accounts.values():
+            self.tree.insert("", "end", values=(
+                a.acc_no, a.name, a.account_type, f"{a.balance:.2f}"))
+
+    def delete_selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            raise BankError("Please select an account from the list first.")
+        acc_no = self.tree.item(sel[0])["values"][0]
+        acc_no = str(acc_no)
+        if not messagebox.askyesno("Confirm", f"Delete account {acc_no}?"):
+            return
+        pin = simpledialog.askstring("PIN", "Enter PIN:", show="*", parent=self)
+        if pin is None:
+            return
+        self.bank.delete_account(acc_no, pin.strip())
+        self.refresh_list()
+        self.status.set(f"Account {acc_no} deleted.")
+        messagebox.showinfo("Deleted", "Account deleted.")
+
+
+if __name__ == "__main__":
+    app = BankApp()
+    app.mainloop()
